@@ -1,0 +1,292 @@
+"""
+modified based on http://tensorflow.org/tutorials/deep_cnn/
+"""
+
+from datetime import datetime
+import os.path
+import time
+
+import numpy as np
+import tensorflow as tf
+import re
+import input_data
+from layers import *
+
+class matrixNN():
+  
+  def __init__(self):
+    # params
+    self.maxstep = 20
+    self.learning_rate = 0.01
+    self.batch_size =128
+    self.data_set_name = "cifar10"
+    self.num_classes = 10
+    self.NUM_EXAMPLES_PER_EPOCH_FOR_TRAIN = 50000
+    self.NUM_EPOCHS_PER_DECAY = 300
+    self.INITIAL_LEARNING_RATE = 0.01
+    self.LEARNING_RATE_DECAY_FACTOR = 0.95
+    self.MOVING_AVERAGE_DECAY = 0.9999     # The decay to use for the moving average.
+    
+    # constant
+    self.TOWER_NAME = 'tower'
+    
+    if self.data_set_name == "cifar10":
+      self.data_dir = "/home/mvg/experiment/cifar-10-batches-bin"
+    else:
+      pass
+    
+    # model definition
+    self.model_params = [["layer1",{"type":"matrix_layer", "params":[32, 32]}],  # [64, 64] and image height x width got matrix L = [64, h], R = [64, w]
+                         ["layer2",{"type":"matrix_layer", "params":[32, 32]}], 
+                         ["layer3",{"type":"matrix_layer", "params":[64, 64]}],  # [64, 64] and image height x width got matrix L = [64, h], R = [64, w]
+                         ["layer4",{"type":"matrix_layer", "params":[64, 64]}], 
+                         ["layer5",{"type":"matrix_layer", "params":[128, 128]}], 
+                         ["layer6",{"type":"matrix_layer", "params":[128, 128]}], 
+                         ["layer7",{"type":"matrix_layer", "params":[64, 64]}],
+                         ["layer8",{"type":"matrix_layer", "params":[64, 64]}],
+                         ["layer9",{"type":"matrix_layer", "params":[32, 32]}],
+                         ["layer10",{"type":"matrix_layer", "params":[32, 32]}],
+                         ["layer11",{"type":"matrix_layer", "params":[10, 1]}],
+                         ]
+
+  def _add_loss_summaries(self, total_loss):
+    """Add summaries for losses in CIFAR-10 model.
+  
+    Generates moving average for all losses and associated summaries for
+    visualizing the performance of the network.
+  
+    Args:
+      total_loss: Total loss from loss().
+    Returns:
+      loss_averages_op: op for generating moving averages of losses.
+    """
+    # Compute the moving average of all individual losses and the total loss.
+    loss_averages = tf.train.ExponentialMovingAverage(0.9, name='avg')
+    losses = tf.get_collection('losses')
+    loss_averages_op = loss_averages.apply(losses + [total_loss])
+  
+    # Attach a scalar summary to all individual losses and the total loss; do the
+    # same for the averaged version of the losses.
+    for l in losses + [total_loss]:
+      # Name each loss as '(raw)' and name the moving average version of the loss
+      # as the original loss name.
+      tf.scalar_summary(l.op.name +' (raw)', l)
+      tf.scalar_summary(l.op.name, loss_averages.average(l))
+  
+    return loss_averages_op
+
+  def inference(self, images):
+    input = images
+    output = tf.zeros_initializer((input.get_shape()), dtype=tf.float32)
+    
+    for item in iter(self.model_params):
+      name, attr = item
+      if attr["type"] == "matrix_layer":
+        output = Layer.matrix_layer(input, name, attr)
+        intput = output
+      elif name == "conv_layer":
+        pass
+      
+    return tf.squeeze(output)
+
+  def loss_plus_square_loss(self, logits, labels, recover, images):
+    """Add L2Loss to all the trainable variables.
+  
+    Add summary for for "Loss" and "Loss/avg".
+    Args:
+      logits: Logits from inference().
+      labels: Labels from distorted_inputs or inputs(). 1-D tensor
+              of shape [batch_size]
+  
+    Returns:
+      Loss tensor of type float.
+    """
+    # Reshape the labels into a dense Tensor of
+    # shape [batch_size, NUM_CLASSES].
+    sparse_labels = tf.reshape(labels, [self.batch_size, 1])
+    indices = tf.reshape(tf.range(self.batch_size), [self.batch_size, 1])
+    concated = tf.concat(1, [indices, sparse_labels])
+    dense_labels = tf.sparse_to_dense(concated,
+                                      [self.batch_size, self.num_classes],
+                                      1.0, 0.0)
+  
+    # Calculate the average cross entropy loss across the batch.
+    cross_entropy = tf.nn.softmax_cross_entropy_with_logits(
+        logits, dense_labels, name='cross_entropy_per_example')
+    cross_entropy_mean = tf.reduce_mean(cross_entropy, name='cross_entropy')
+    tf.add_to_collection('losses', cross_entropy_mean)
+    # add square loss
+    tf.add_to_collection('losses', self.square_loss(recover, images))
+  
+    # The total loss is defined as the cross entropy loss plus all of the weight
+    # decay terms (L2 loss).
+    return tf.add_n(tf.get_collection('losses'), name='total_loss')
+
+  def square_loss(self, recover, images):
+      
+    return tf.reduce_mean(tf.square(recover - images), name='square_loss')
+  
+  def loss(self, logits, labels):
+    """Add L2Loss to all the trainable variables.
+  
+    Add summary for for "Loss" and "Loss/avg".
+    Args:
+      logits: Logits from inference().
+      labels: Labels from distorted_inputs or inputs(). 1-D tensor
+              of shape [batch_size]
+  
+    Returns:
+      Loss tensor of type float.
+    """
+    # Reshape the labels into a dense Tensor of
+    # shape [batch_size, NUM_CLASSES].
+    sparse_labels = tf.reshape(labels, [self.batch_size, 1])
+    indices = tf.reshape(tf.range(self.batch_size), [self.batch_size, 1])
+    concated = tf.concat(1, [indices, sparse_labels])
+    dense_labels = tf.sparse_to_dense(concated,
+                                      [self.batch_size, self.num_classes],
+                                      1.0, 0.0)
+  
+    # Calculate the average cross entropy loss across the batch.
+    cross_entropy = tf.nn.softmax_cross_entropy_with_logits(
+        logits, dense_labels, name='cross_entropy_per_example')
+    cross_entropy_mean = tf.reduce_mean(cross_entropy, name='cross_entropy')
+    tf.add_to_collection('losses', cross_entropy_mean)
+  
+    # The total loss is defined as the cross entropy loss plus all of the weight
+    # decay terms (L2 loss).
+    return tf.add_n(tf.get_collection('losses'), name='total_loss')
+
+
+  def train(self, total_loss, global_step):
+    """Train CIFAR-10 model.
+  
+    Create an optimizer and apply to all trainable variables. Add moving
+    average for all trainable variables.
+  
+    Args:
+      total_loss: Total loss from loss().
+      global_step: Integer Variable counting the number of training steps
+        processed.
+    Returns:
+      train_op: op for training.
+    """
+    # Variables that affect learning rate.
+    num_batches_per_epoch = self.NUM_EXAMPLES_PER_EPOCH_FOR_TRAIN / self.batch_size
+    decay_steps = int(num_batches_per_epoch * self.NUM_EPOCHS_PER_DECAY)
+  
+    # Decay the learning rate exponentially based on the number of steps.
+    lr = tf.train.exponential_decay(self.INITIAL_LEARNING_RATE,
+                                    global_step,
+                                    decay_steps,
+                                    self.LEARNING_RATE_DECAY_FACTOR,
+                                    staircase=True)
+    tf.scalar_summary('learning_rate', lr)
+  
+    # Generate moving averages of all losses and associated summaries.
+    loss_averages_op = self._add_loss_summaries(total_loss)
+  
+    # Compute gradients.
+    with tf.control_dependencies([loss_averages_op]):
+      opt = tf.train.GradientDescentOptimizer(lr)
+      grads = opt.compute_gradients(total_loss)
+  
+    # Apply gradients.
+    apply_gradient_op = opt.apply_gradients(grads, global_step=global_step)
+  
+    # Add histograms for trainable variables.
+    for var in tf.trainable_variables():
+      tf.histogram_summary(var.op.name, var)
+  
+    # Add histograms for gradients.
+    for grad, var in grads:
+      if grad:
+        tf.histogram_summary(var.op.name + '/gradients', grad)
+  
+    # Track the moving averages of all trainable variables.
+    variable_averages = tf.train.ExponentialMovingAverage(
+        self.MOVING_AVERAGE_DECAY, global_step)
+    variables_averages_op = variable_averages.apply(tf.trainable_variables())
+  
+    with tf.control_dependencies([apply_gradient_op, variables_averages_op]):
+      train_op = tf.no_op(name='train')
+  
+    return train_op
+
+  
+  def model(self):
+    """Train CIFAR-10 for a number of steps."""
+    with tf.Graph().as_default():
+      global_step = tf.Variable(0, trainable=False)
+  
+      # Get images and labels for CIFAR-10.
+      input = input_data.InputData(self.data_set_name, self.batch_size, self.data_dir)
+      images, labels = input.get_data() # b01c
+  
+      # Build a Graph that computes the logits predictions from the
+      # inference model.
+      logits = self.inference(images)
+  
+      # Calculate loss.
+      loss = self.loss(logits, labels)
+  
+      # Build a Graph that trains the model with one batch of examples and
+      # updates the model parameters.
+      train_op = self.train(loss, global_step)
+  
+      # Create a saver.
+      saver = tf.train.Saver(tf.all_variables())
+  
+      # Build the summary operation based on the TF collection of Summaries.
+      summary_op = tf.merge_all_summaries()
+  
+      # Build an initialization operation to run below.
+      init = tf.initialize_all_variables()
+  
+      # Start running operations on the Graph.
+      sess = tf.Session()
+      sess.run(init)
+  
+      # Start the queue runners.
+      summary_writer = tf.train.SummaryWriter('/home/mvg/experiment/1st', graph_def=sess.graph_def)
+  
+      for step in xrange(self.maxstep):
+        start_time = time.time()
+        _, loss_value = sess.run([train_op, loss])
+        duration = time.time() - start_time
+  
+        assert not np.isnan(loss_value), 'Model diverged with loss = NaN'
+  
+        if step % 10 == 0:
+          num_examples_per_step = self.batch_size
+          examples_per_sec = num_examples_per_step / duration
+          sec_per_batch = float(duration)
+  
+          format_str = ('%s: step %d, loss = %.2f (%.1f examples/sec; %.3f ' 'sec/batch)')
+          print (format_str % (datetime.now(), step, loss_value, examples_per_sec, sec_per_batch))
+  
+        if step % 200 == 0:
+          summary_str = sess.run(summary_op)
+          summary_writer.add_summary(summary_str, step)
+  
+        # Save the model checkpoint periodically.
+        if step % 1000 == 0 or (step + 1) == self.max_steps:
+          checkpoint_path = os.path.join('/home/mvg/experiment/1st', 'model.ckpt')
+          saver.save(sess, checkpoint_path, global_step=step)
+
+if __name__ == '__main__':
+  nn = matrixNN()
+  nn.model()
+
+
+
+
+
+
+
+
+
+
+
+
+
